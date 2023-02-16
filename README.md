@@ -79,6 +79,7 @@ adaptive_lighting:
 | `separate_turn_on_commands` | Whether to use separate `light.turn_on` calls for color and brightness, needed for some types of lights                                                                                                                       | False    | False          | boolean |
 | `send_split_delay`          | Wait between commands (milliseconds), when separate_turn_on_commands is used. May ensure that both commands are handled by the bulb correctly.                                                                                | False    | 0              | integer |
 | `adapt_delay`               | Wait time in seconds between light turn on, and Adaptive Lights applying changes to the light state. May avoid flickering.                                                                                                    | False    | 0              | integer |
+| `scenes_are_manual`           | Whether a light being turned on as part of a scene turn_on should disable Adaptive Lighting, unlike `take_over_control` considered `manual_control` even if lights are off                | False   | True      | boolean | 
 
 Full example:
 
@@ -104,6 +105,7 @@ adaptive_lighting:
   take_over_control: true
   detect_non_ha_changes: false
   only_once: false
+  scenes_eq_manual: true
 
 ```
 

@@ -45,6 +45,7 @@ from homeassistant.components.light import (
     is_on,
 )
 from homeassistant.components.light import DOMAIN as LIGHT_DOMAIN
+from homeassistant.components.scene import DOMAIN as SCENE_DOMAIN
 from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
@@ -112,6 +113,7 @@ from .const import (
     CONF_MIN_SUNSET_TIME,
     CONF_ONLY_ONCE,
     CONF_PREFER_RGB_COLOR,
+    CONF_SCENES_EQ_MANUAL,
     CONF_SEND_SPLIT_DELAY,
     CONF_SEPARATE_TURN_ON_COMMANDS,
     CONF_SLEEP_BRIGHTNESS,
@@ -308,6 +310,22 @@ def _fire_manual_control_event(
         context=context,
     )
 
+@callback
+def _fire_global_manual_control_event(
+    hass: HomeAssistant, light: str, context: Context, is_async=True
+):
+    """Fire an event that 'light' is marked as manual_control for all installed Adaptive Light integrations"""
+    fire = hass.bus.async_fire if is_async else hass.bus.fire
+    _LOGGER.debug(
+        "'adaptive_lighting.manual_control' event fired globally for light %s",
+        light,
+    )
+    fire(
+        f"{DOMAIN}.manual_control",
+        {ATTR_ENTITY_ID: light},
+        context=context,
+    )
+
 
 async def async_setup_entry(
     hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities: bool
@@ -316,9 +334,12 @@ async def async_setup_entry(
     data = hass.data[DOMAIN]
     assert config_entry.entry_id in data
 
-    if ATTR_TURN_ON_OFF_LISTENER not in data:
-        data[ATTR_TURN_ON_OFF_LISTENER] = TurnOnOffListener(hass)
-    turn_on_off_listener = data[ATTR_TURN_ON_OFF_LISTENER]
+    turn_on_off_listener = data.setdefault(ATTR_TURN_ON_OFF_LISTENER, TurnOnOffListener(hass))
+    config_options = deepcopy(config_entry.data) # To be safe
+    global_options = { 
+        CONF_SCENES_EQ_MANUAL: config_options[CONF_SCENES_EQ_MANUAL]
+    }
+    turn_on_off_listener.apply_globals(global_options)
 
     sleep_mode_switch = SimpleSwitch("Sleep Mode", False, hass, config_entry)
     adapt_color_switch = SimpleSwitch("Adapt Color", True, hass, config_entry)
@@ -1299,6 +1320,10 @@ class TurnOnOffListener:
         # When a state is different `max_cnt_significant_changes` times in a row,
         # mark it as manually_controlled.
         self.max_cnt_significant_changes = 2
+        # Should we mark lights turned on via scene activation as manual
+        self.are_scenes_manual: bool | None = None
+        # Track the last scene activation
+        self.last_scene_context: str | None = None
 
         self.remove_listener = self.hass.bus.async_listen(
             EVENT_CALL_SERVICE, self.turn_on_off_event_listener
@@ -1306,6 +1331,21 @@ class TurnOnOffListener:
         self.remove_listener2 = self.hass.bus.async_listen(
             EVENT_STATE_CHANGED, self.state_changed_event_listener
         )
+
+    def apply_globals(self, global_options: dict[str, Any]) -> None:
+        scenes_manual_cur = self.are_scenes_manual
+        scenes_manual_new = global_options[CONF_SCENES_EQ_MANUAL]
+        if scenes_manual_cur is not None:
+            if scenes_manual_cur != scenes_manual_new:
+                # TODO ensure each light is specific to one instance of Adaptive Lighting
+                # during configuration or just accept this as a global setting
+                _LOGGER.warn(
+                    "One Adaptive Lighting integration is overriding the %s setting of another"
+                    " Lights triggered by a scene will be considered as manual control"
+                    " despite one configuration specifying that they should not be.",
+                    CONF_SCENES_EQ_MANUAL,
+                )
+        self.are_scenes_manual = scenes_manual_cur or scenes_manual_new 
 
     def reset(self, *lights, reset_manual_control=True) -> None:
         """Reset the 'manual_control' status of the lights."""
@@ -1319,10 +1359,14 @@ class TurnOnOffListener:
     async def turn_on_off_event_listener(self, event: Event) -> None:
         """Track 'light.turn_off' and 'light.turn_on' service calls."""
         domain = event.data.get(ATTR_DOMAIN)
+        service = event.data.get(ATTR_SERVICE)
+
+        if domain == SCENE_DOMAIN and service == SERVICE_TURN_ON:
+            self.last_scene_context = event.context.id
+
         if domain != LIGHT_DOMAIN:
             return
 
-        service = event.data[ATTR_SERVICE]
         service_data = event.data[ATTR_SERVICE_DATA]
         if ATTR_ENTITY_ID in service_data:
             entity_ids = cv.ensure_list_csv(service_data[ATTR_ENTITY_ID])
@@ -1369,6 +1413,16 @@ class TurnOnOffListener:
                 if task is not None:
                     task.cancel()
                 self.turn_on_event[eid] = event
+                if self.are_scenes_manual and event.context.id == self.last_scene_context:
+                    self.manual_control[eid] = True
+                    _fire_global_manual_control_event(self.hass, eid, event.context)
+                    _LOGGER.debug(
+                        "'%s' was turned on by a scene activation (context.id='%s')"
+                        " Lighting will stop adapting the light until the switch"
+                        " or the light turns off and then on again.",
+                        eid,
+                        event.context.id,
+                    )
 
     async def state_changed_event_listener(self, event: Event) -> None:
         """Track 'state_changed' events."""
